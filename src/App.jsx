@@ -67,6 +67,7 @@ const defaultActivities = [
 ]
 
 const todayKey = () => new Date().toISOString().slice(0, 10)
+const dateKeyFromDate = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 const formatSelectedDate = (dateKey) => {
   const value = dateKey ? new Date(`${dateKey}T00:00:00`) : new Date()
   return value.toLocaleDateString('en-US', {
@@ -81,29 +82,32 @@ const getDayDoc = (dateKey) => doc(db, 'dopamine_logs', dateKey)
 
 const buildMonthGrid = (year, monthIndex) => {
   const firstDayOfMonth = new Date(year, monthIndex, 1)
-  const lastDayOfMonth = new Date(year, monthIndex + 1, 0)
   const firstWeekday = (firstDayOfMonth.getDay() + 6) % 7
-  const totalDays = lastDayOfMonth.getDate()
-  const cells = []
-
   const prevMonthDays = new Date(year, monthIndex, 0).getDate()
+  const totalDays = new Date(year, monthIndex + 1, 0).getDate()
+  const cells = []
 
   for (let i = 0; i < firstWeekday; i += 1) {
     cells.push({
-      day: prevMonthDays - firstWeekday + i + 1,
+      date: new Date(year, monthIndex - 1, prevMonthDays - firstWeekday + i + 1),
       isCurrentMonth: false,
     })
   }
 
   for (let day = 1; day <= totalDays; day += 1) {
-    cells.push({ day, isCurrentMonth: true })
+    cells.push({
+      date: new Date(year, monthIndex, day),
+      isCurrentMonth: true,
+    })
   }
 
+  let nextDay = 1
   while (cells.length % 7 !== 0) {
     cells.push({
-      day: cells.length % 7 === 0 ? 1 : cells.length % 7,
+      date: new Date(year, monthIndex + 1, nextDay),
       isCurrentMonth: false,
     })
+    nextDay += 1
   }
 
   return cells
@@ -200,15 +204,14 @@ function Header() {
   )
 }
 
-function MonthlyCalendar({ dailyEntries, budget, selectedDate, onSelectDate }) {
-  const monthDate = new Date()
-  const monthLabel = monthDate.toLocaleDateString('en-US', {
+function MonthlyCalendar({ dailyEntries, budget, selectedDate, visibleMonth, onSelectDate, onMonthChange }) {
+  const monthLabel = visibleMonth.toLocaleDateString('en-US', {
     month: 'long',
     year: 'numeric',
   })
   const grid = useMemo(
-    () => buildMonthGrid(monthDate.getFullYear(), monthDate.getMonth()),
-    [monthDate],
+    () => buildMonthGrid(visibleMonth.getFullYear(), visibleMonth.getMonth()),
+    [visibleMonth],
   )
 
   const weekdayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
@@ -221,27 +224,55 @@ function MonthlyCalendar({ dailyEntries, budget, selectedDate, onSelectDate }) {
     if (total === 0) {
       return 'border border-[#edf2ed] bg-[#f7faf7] text-slate-500'
     }
-    if (total <= budget * 0.5) {
-      return 'border border-[#b7d4b7] bg-[#dfeeed] text-[#335a39]'
+
+    const warningThreshold = budget * 0.6
+    if (total >= warningThreshold && total < budget) {
+      return 'border border-[#f7d4a3] bg-[#ffedd5] text-[#8a5a24]'
     }
-    if (total <= budget) {
-      return 'border border-[#a6c2a5] bg-[#cfe2cf] text-[#24462c]'
+    if (total >= budget) {
+      return 'border border-[#f0b9b3] bg-[#fee2e2] text-[#8a2d2d]'
     }
-    if (total <= budget * 1.2) {
-      return 'border border-[#efd2ac] bg-[#f5e0b5] text-[#7d5d2e]'
-    }
-    return 'border border-[#f0c2b7] bg-[#fde8e4] text-[#8d5647]'
+
+    return 'border border-[#cfe2cf] bg-[#eaf3ea] text-[#335a39]'
   }
 
   return (
     <section className="rounded-[28px] border border-[#e7ece6] bg-white/80 p-5 shadow-[0_18px_40px_rgba(116,147,115,0.12)] backdrop-blur-xl">
-      <div className="mb-5 flex items-center justify-between">
-        <div>
-          <p className="text-xs uppercase tracking-[0.24em] text-[#739373]">Monthly overview</p>
-          <h2 className="mt-2 text-2xl font-semibold text-slate-800">{monthLabel}</h2>
+      <div className="mb-5 flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            aria-label="Previous month"
+            onClick={() => onMonthChange(-1)}
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-[#dfe9df] bg-[#f5faf5] text-xl text-[#4d6b4d] transition hover:bg-[#edf6ee]"
+          >
+            &lt;
+          </button>
+          <div>
+            <p className="text-xs uppercase tracking-[0.24em] text-[#739373]">Monthly overview</p>
+            <h2 className="mt-2 text-2xl font-semibold text-slate-800">{monthLabel}</h2>
+          </div>
+          <button
+            type="button"
+            aria-label="Next month"
+            onClick={() => onMonthChange(1)}
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-[#dfe9df] bg-[#f5faf5] text-xl text-[#4d6b4d] transition hover:bg-[#edf6ee]"
+          >
+            &gt;
+          </button>
         </div>
-        <div className="rounded-full border border-[#bfd2bf] bg-[#edf6ee] px-3 py-1.5 text-sm text-[#4d6b4d]">
-          Heatmap view
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onMonthChange(0, true)}
+            className="rounded-full border border-[#bfd2bf] bg-[#edf6ee] px-3 py-1.5 text-sm text-[#4d6b4d] transition hover:bg-[#e3ebe3]"
+          >
+            Today
+          </button>
+          <div className="rounded-full border border-[#bfd2bf] bg-[#edf6ee] px-3 py-1.5 text-sm text-[#4d6b4d]">
+            Heatmap view
+          </div>
         </div>
       </div>
 
@@ -255,19 +286,24 @@ function MonthlyCalendar({ dailyEntries, budget, selectedDate, onSelectDate }) {
 
       <div className="grid grid-cols-7 gap-2">
         {grid.map((cell, index) => {
-          const dateKey = `${monthDate.getFullYear()}-${String(monthDate.getMonth() + 1).padStart(2, '0')}-${String(cell.day).padStart(2, '0')}`
+          const dateKey = dateKeyFromDate(cell.date)
           const total = dailyEntries[dateKey]?.total ?? 0
 
           return (
             <button
-              key={`${cell.day}-${index}`}
+              key={`${dateKey}-${index}`}
               type="button"
-              onClick={() => onSelectDate(dateKey)}
+              onClick={() => {
+                onSelectDate(dateKey)
+                if (!cell.isCurrentMonth) {
+                  onMonthChange(0, false, cell.date)
+                }
+              }}
               className={`flex min-h-16 flex-col justify-between rounded-xl p-2 text-left transition hover:scale-[1.01] ${
                 cell.isCurrentMonth ? dayColor(total, dateKey) : 'border border-[#edf2ed] bg-[#f5faf5] text-slate-400'
               }`}
             >
-              <span className="text-sm font-medium">{cell.day}</span>
+              <span className="text-sm font-medium">{cell.date.getDate()}</span>
               <span className="text-[10px] opacity-90">{total || '0'}</span>
             </button>
           )
@@ -282,6 +318,10 @@ function App() {
   const [dailyEntries, setDailyEntries] = useState({})
   const [presetActivities, setPresetActivities] = useState(defaultActivities)
   const [selectedDate, setSelectedDate] = useState(() => todayKey())
+  const [calendarMonth, setCalendarMonth] = useState(() => {
+    const now = new Date()
+    return new Date(now.getFullYear(), now.getMonth(), 1)
+  })
   const [customName, setCustomName] = useState('')
   const [customPoints, setCustomPoints] = useState(10)
   const [editingId, setEditingId] = useState(null)
@@ -522,10 +562,31 @@ function App() {
     setCustomPoints(10)
   }
 
+  const handleSelectDate = (dateKey) => {
+    setSelectedDate(dateKey)
+    const [year, month] = dateKey.split('-').map(Number)
+    const nextMonth = new Date(year, month - 1, 1)
+    setCalendarMonth(nextMonth)
+  }
+
+  const handleCalendarMonthChange = (monthOffset = 0, jumpToToday = false, forcedDate = null) => {
+    if (jumpToToday) {
+      const now = new Date()
+      setCalendarMonth(new Date(now.getFullYear(), now.getMonth(), 1))
+      return
+    }
+
+    if (forcedDate) {
+      setCalendarMonth(new Date(forcedDate.getFullYear(), forcedDate.getMonth(), 1))
+      return
+    }
+
+    setCalendarMonth((current) => new Date(current.getFullYear(), current.getMonth() + monthOffset, 1))
+  }
+
   const monthStats = useMemo(() => {
-    const monthDate = new Date()
-    const monthIndex = monthDate.getMonth()
-    const year = monthDate.getFullYear()
+    const monthIndex = calendarMonth.getMonth()
+    const year = calendarMonth.getFullYear()
     const daysInMonth = new Date(year, monthIndex + 1, 0).getDate()
 
     const days = Array.from({ length: daysInMonth }, (_, index) => {
@@ -541,7 +602,7 @@ function App() {
     const successRate = (successDays / daysInMonth) * 100
 
     return { days, successDays, totalSpent, average, successRate }
-  }, [budget, dailyEntries])
+  }, [budget, calendarMonth, dailyEntries])
 
   const remaining = Math.max(budget - selectedDateRecord.total, 0)
   const selectedLabel = formatSelectedDate(selectedDate)
@@ -876,7 +937,9 @@ function App() {
             dailyEntries={dailyEntries}
             budget={budget}
             selectedDate={selectedDate}
-            onSelectDate={setSelectedDate}
+            visibleMonth={calendarMonth}
+            onSelectDate={handleSelectDate}
+            onMonthChange={handleCalendarMonthChange}
           />
         </div>
 
