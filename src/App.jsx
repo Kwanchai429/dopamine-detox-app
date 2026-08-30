@@ -12,12 +12,14 @@ import {
   Wallet,
   Zap,
 } from 'lucide-react'
-
-const STORAGE_KEYS = {
-  budget: 'dopamine-budget',
-  entries: 'dopamine-entries',
-  activities: 'dopamine-activity-presets',
-}
+import {
+  collection,
+  deleteDoc,
+  doc,
+  onSnapshot,
+  setDoc,
+} from 'firebase/firestore'
+import { db } from './firebase'
 
 const defaultActivities = [
   {
@@ -64,16 +66,18 @@ const defaultActivities = [
   },
 ]
 
-const safeParse = (key, fallback) => {
-  try {
-    const value = window.localStorage.getItem(key)
-    return value ? JSON.parse(value) : fallback
-  } catch {
-    return fallback
-  }
-}
-
 const todayKey = () => new Date().toISOString().slice(0, 10)
+const formatSelectedDate = (dateKey) => {
+  const value = dateKey ? new Date(`${dateKey}T00:00:00`) : new Date()
+  return value.toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  })
+}
+const getSettingsDoc = () => doc(db, 'dopamine_settings', 'app_settings')
+const getDayDoc = (dateKey) => doc(db, 'dopamine_logs', dateKey)
 
 const buildMonthGrid = (year, monthIndex) => {
   const firstDayOfMonth = new Date(year, monthIndex, 1)
@@ -103,6 +107,38 @@ const buildMonthGrid = (year, monthIndex) => {
   }
 
   return cells
+}
+
+const persistSettings = async (nextBudget, nextActivities) => {
+  await setDoc(
+    getSettingsDoc(),
+    {
+      budget: Number(nextBudget) || 100,
+      presetActivities: nextActivities,
+      updatedAt: new Date().toISOString(),
+    },
+    { merge: true },
+  )
+}
+
+const persistDayRecord = async (dateKey, nextRecord) => {
+  const ref = getDayDoc(dateKey)
+
+  if (!nextRecord || !nextRecord.items?.length) {
+    await deleteDoc(ref).catch(() => {})
+    return
+  }
+
+  await setDoc(
+    ref,
+    {
+      dateKey,
+      items: nextRecord.items,
+      total: nextRecord.total,
+      updatedAt: new Date().toISOString(),
+    },
+    { merge: true },
+  )
 }
 
 function StatCard({ icon: Icon, label, value, hint, tone = 'sage' }) {
@@ -164,7 +200,7 @@ function Header() {
   )
 }
 
-function MonthlyCalendar({ dailyEntries, budget }) {
+function MonthlyCalendar({ dailyEntries, budget, selectedDate, onSelectDate }) {
   const monthDate = new Date()
   const monthLabel = monthDate.toLocaleDateString('en-US', {
     month: 'long',
@@ -177,7 +213,11 @@ function MonthlyCalendar({ dailyEntries, budget }) {
 
   const weekdayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
-  const dayColor = (total) => {
+  const dayColor = (total, dateKey) => {
+    const isSelected = selectedDate === dateKey
+    if (isSelected) {
+      return 'border border-[#9bb89c] bg-[#e8f4e7] text-[#234e2b] shadow-[inset_0_0_0_1px_rgba(115,147,115,0.35)]'
+    }
     if (total === 0) {
       return 'border border-[#edf2ed] bg-[#f7faf7] text-slate-500'
     }
@@ -219,15 +259,17 @@ function MonthlyCalendar({ dailyEntries, budget }) {
           const total = dailyEntries[dateKey]?.total ?? 0
 
           return (
-            <div
+            <button
               key={`${cell.day}-${index}`}
-              className={`flex min-h-16 flex-col justify-between rounded-xl p-2 text-left ${
-                cell.isCurrentMonth ? dayColor(total) : 'border border-[#edf2ed] bg-[#f5faf5] text-slate-400'
+              type="button"
+              onClick={() => onSelectDate(dateKey)}
+              className={`flex min-h-16 flex-col justify-between rounded-xl p-2 text-left transition hover:scale-[1.01] ${
+                cell.isCurrentMonth ? dayColor(total, dateKey) : 'border border-[#edf2ed] bg-[#f5faf5] text-slate-400'
               }`}
             >
               <span className="text-sm font-medium">{cell.day}</span>
               <span className="text-[10px] opacity-90">{total || '0'}</span>
-            </div>
+            </button>
           )
         })}
       </div>
@@ -236,121 +278,141 @@ function MonthlyCalendar({ dailyEntries, budget }) {
 }
 
 function App() {
-  const [budget, setBudget] = useState(() => safeParse(STORAGE_KEYS.budget, 100))
-  const [dailyEntries, setDailyEntries] = useState(() => safeParse(STORAGE_KEYS.entries, {}))
-  const [presetActivities, setPresetActivities] = useState(() =>
-    safeParse(STORAGE_KEYS.activities, defaultActivities),
-  )
+  const [budget, setBudget] = useState(100)
+  const [dailyEntries, setDailyEntries] = useState({})
+  const [presetActivities, setPresetActivities] = useState(defaultActivities)
+  const [selectedDate, setSelectedDate] = useState(() => todayKey())
   const [customName, setCustomName] = useState('')
   const [customPoints, setCustomPoints] = useState(10)
   const [editingId, setEditingId] = useState(null)
   const [editDraft, setEditDraft] = useState({ name: '', points: 0, category: 'CUSTOM' })
   const [isAlertDismissed, setIsAlertDismissed] = useState(false)
+  const [isLoading, setIsLoading] = useState(true)
 
   useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEYS.budget, JSON.stringify(budget))
-  }, [budget])
+    const settingsRef = getSettingsDoc()
+    const logsRef = collection(db, 'dopamine_logs')
 
-  useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEYS.entries, JSON.stringify(dailyEntries))
-  }, [dailyEntries])
+    const unsubscribeSettings = onSnapshot(
+      settingsRef,
+      async (snapshot) => {
+        if (!snapshot.exists()) {
+          await setDoc(settingsRef, { budget: 100, presetActivities: defaultActivities }, { merge: true })
+          return
+        }
 
-  useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEYS.activities, JSON.stringify(presetActivities))
-  }, [presetActivities])
+        const data = snapshot.data() ?? {}
+        setBudget(Number(data.budget) || 100)
+        setPresetActivities(Array.isArray(data.presetActivities) && data.presetActivities.length ? data.presetActivities : defaultActivities)
+      },
+      (error) => {
+        console.error('Failed to load settings:', error)
+        setBudget(100)
+        setPresetActivities(defaultActivities)
+      },
+    )
+
+    const unsubscribeLogs = onSnapshot(
+      logsRef,
+      (snapshot) => {
+        const nextEntries = {}
+
+        snapshot.forEach((document) => {
+          const data = document.data() ?? {}
+          const items = Array.isArray(data.items) ? data.items : []
+          nextEntries[document.id] = {
+            items,
+            total: Number(data.total) || items.reduce((sum, item) => sum + Number(item.points || 0), 0),
+          }
+        })
+
+        setDailyEntries(nextEntries)
+        setIsLoading(false)
+      },
+      (error) => {
+        console.error('Failed to load daily logs:', error)
+        setDailyEntries({})
+        setIsLoading(false)
+      },
+    )
+
+    return () => {
+      unsubscribeSettings()
+      unsubscribeLogs()
+    }
+  }, [])
 
   const today = todayKey()
-  const todayRecord = dailyEntries[today] ?? { items: [], total: 0 }
+  const isToday = selectedDate === today
+  const selectedDateRecord = dailyEntries[selectedDate] ?? { items: [], total: 0 }
   const warningThreshold = 60
-  const progressPercent = Math.min((todayRecord.total / budget) * 100, 100)
-  const isWarning = todayRecord.total >= warningThreshold
-  const hasExceeded = todayRecord.total > budget
-  const overLimit = Math.max(0, todayRecord.total - budget)
+  const progressPercent = Math.min((selectedDateRecord.total / Math.max(budget, 1)) * 100, 100)
+  const isWarning = selectedDateRecord.total >= warningThreshold
+  const hasExceeded = selectedDateRecord.total > budget
+  const overLimit = Math.max(0, selectedDateRecord.total - budget)
 
   useEffect(() => {
-    if (todayRecord.total < warningThreshold) {
+    if (selectedDateRecord.total < warningThreshold) {
       setIsAlertDismissed(false)
     }
-  }, [todayRecord.total])
+  }, [selectedDateRecord.total])
 
-  const addActivity = (activity) => {
-    setDailyEntries((prev) => {
-      const existing = prev[today] ?? { items: [], total: 0 }
-      const item = {
-        id: `${activity.id}-${Date.now()}-${Math.random()}`,
-        activityId: activity.id,
-        name: activity.name,
-        points: activity.points,
-        createdAt: new Date().toISOString(),
-      }
+  const addActivity = async (activity) => {
+    if (!isToday) return
 
-      return {
-        ...prev,
-        [today]: {
-          items: [...existing.items, item],
-          total: existing.total + item.points,
-        },
-      }
-    })
+    const existing = dailyEntries[selectedDate] ?? { items: [], total: 0 }
+    const item = {
+      id: `${activity.id}-${Date.now()}-${Math.random()}`,
+      activityId: activity.id,
+      name: activity.name,
+      points: Number(activity.points) || 0,
+      createdAt: new Date().toISOString(),
+    }
+
+    const nextRecord = {
+      items: [...existing.items, item],
+      total: existing.total + item.points,
+    }
+
+    await persistDayRecord(selectedDate, nextRecord)
   }
 
-  const removeLatestActivity = (activityId) => {
-    setDailyEntries((prev) => {
-      const current = prev[today]
-      if (!current) return prev
+  const removeLatestActivity = async (activityId) => {
+    if (!isToday) return
 
-      const lastIndex = [...current.items].reverse().findIndex((item) => item.activityId === activityId)
-      if (lastIndex === -1) return prev
+    const current = dailyEntries[selectedDate]
+    if (!current) return
 
-      const targetIndex = current.items.length - 1 - lastIndex
-      const removedItem = current.items[targetIndex]
-      const nextItems = current.items.filter((item) => item.id !== removedItem.id)
-      const nextRecord = nextItems.length
-        ? { items: nextItems, total: nextItems.reduce((sum, item) => sum + item.points, 0) }
-        : null
+    const lastIndex = [...current.items].reverse().findIndex((item) => item.activityId === activityId)
+    if (lastIndex === -1) return
 
-      if (!nextRecord) {
-        const copy = { ...prev }
-        delete copy[today]
-        return copy
-      }
+    const targetIndex = current.items.length - 1 - lastIndex
+    const removedItem = current.items[targetIndex]
+    const nextItems = current.items.filter((item) => item.id !== removedItem.id)
+    const nextRecord = nextItems.length
+      ? { items: nextItems, total: nextItems.reduce((sum, item) => sum + Number(item.points || 0), 0) }
+      : null
 
-      return {
-        ...prev,
-        [today]: nextRecord,
-      }
-    })
+    await persistDayRecord(selectedDate, nextRecord)
   }
 
-  const removeEntry = (id) => {
-    setDailyEntries((prev) => {
-      const current = prev[today]
-      if (!current) return prev
+  const removeEntry = async (id) => {
+    if (!isToday) return
 
-      const nextItems = current.items.filter((item) => item.id !== id)
-      const nextRecord = nextItems.length
-        ? { items: nextItems, total: nextItems.reduce((sum, item) => sum + item.points, 0) }
-        : null
+    const current = dailyEntries[selectedDate]
+    if (!current) return
 
-      if (!nextRecord) {
-        const copy = { ...prev }
-        delete copy[today]
-        return copy
-      }
+    const nextItems = current.items.filter((item) => item.id !== id)
+    const nextRecord = nextItems.length
+      ? { items: nextItems, total: nextItems.reduce((sum, item) => sum + Number(item.points || 0), 0) }
+      : null
 
-      return {
-        ...prev,
-        [today]: nextRecord,
-      }
-    })
+    await persistDayRecord(selectedDate, nextRecord)
   }
 
-  const resetToday = () => {
-    setDailyEntries((prev) => {
-      const copy = { ...prev }
-      delete copy[today]
-      return copy
-    })
+  const resetToday = async () => {
+    if (!isToday) return
+    await deleteDoc(getDayDoc(selectedDate)).catch(() => {})
   }
 
   const startEditActivity = (activity) => {
@@ -362,81 +424,81 @@ function App() {
     })
   }
 
-  const saveEditActivity = (activityId) => {
+  const saveEditActivity = async (activityId) => {
+    if (!isToday) return
+
     const nextPoints = Number(editDraft.points) || 1
     const trimmedName = editDraft.name.trim()
 
     if (!trimmedName) return
 
-    setPresetActivities((prev) =>
-      prev.map((activity) =>
-        activity.id === activityId
-          ? {
-              ...activity,
-              name: trimmedName,
-              points: nextPoints,
-              category: editDraft.category,
-            }
-          : activity,
-      ),
+    const nextActivities = presetActivities.map((activity) =>
+      activity.id === activityId
+        ? {
+            ...activity,
+            name: trimmedName,
+            points: nextPoints,
+            category: editDraft.category,
+          }
+        : activity,
     )
 
-    setDailyEntries((prev) => {
-      const next = { ...prev }
+    setPresetActivities(nextActivities)
+    await persistSettings(budget, nextActivities)
 
-      Object.keys(next).forEach((dayKey) => {
-        const record = next[dayKey]
+    const nextDailyEntries = { ...dailyEntries }
+    await Promise.all(
+      Object.keys(nextDailyEntries).map(async (dayKey) => {
+        const record = nextDailyEntries[dayKey]
         if (!record?.items?.length) return
 
-        const originalItems = record.items
-        const matchedItems = originalItems.filter((item) => item.activityId === activityId)
-        if (!matchedItems.length) return
-
-        const updatedItems = originalItems.map((item) =>
-          item.activityId === activityId ? { ...item, name: trimmedName, points: nextPoints, category: editDraft.category } : item,
+        const updatedItems = record.items.map((item) =>
+          item.activityId === activityId
+            ? { ...item, name: trimmedName, points: nextPoints, category: editDraft.category }
+            : item,
         )
 
-        const nextTotal = updatedItems.reduce((sum, item) => sum + item.points, 0)
-        next[dayKey] = { items: updatedItems, total: nextTotal }
-      })
+        const nextRecord = {
+          items: updatedItems,
+          total: updatedItems.reduce((sum, item) => sum + Number(item.points || 0), 0),
+        }
 
-      return next
-    })
+        await persistDayRecord(dayKey, nextRecord)
+      }),
+    )
 
     setEditingId(null)
   }
 
-  const deleteActivity = (activityId) => {
-    setPresetActivities((prev) => prev.filter((activity) => activity.id !== activityId))
+  const deleteActivity = async (activityId) => {
+    if (!isToday) return
 
-    setDailyEntries((prev) => {
-      const next = { ...prev }
+    const nextActivities = presetActivities.filter((activity) => activity.id !== activityId)
+    setPresetActivities(nextActivities)
+    await persistSettings(budget, nextActivities)
 
-      Object.keys(next).forEach((dayKey) => {
-        const record = next[dayKey]
+    await Promise.all(
+      Object.keys(dailyEntries).map(async (dayKey) => {
+        const record = dailyEntries[dayKey]
         if (!record?.items?.length) return
 
         const filteredItems = record.items.filter((item) => item.activityId !== activityId)
-        if (filteredItems.length === record.items.length) return
-
-        next[dayKey] = filteredItems.length
-          ? { items: filteredItems, total: filteredItems.reduce((sum, item) => sum + item.points, 0) }
+        const nextRecord = filteredItems.length
+          ? { items: filteredItems, total: filteredItems.reduce((sum, item) => sum + Number(item.points || 0), 0) }
           : null
 
-        if (!next[dayKey]) {
-          delete next[dayKey]
-        }
-      })
-
-      return next
-    })
+        await persistDayRecord(dayKey, nextRecord)
+      }),
+    )
 
     if (editingId === activityId) {
       setEditingId(null)
     }
   }
 
-  const addCustomActivity = (event) => {
+  const addCustomActivity = async (event) => {
+    if (!isToday) return
+
     event.preventDefault()
     const trimmedName = customName.trim()
     const points = Number(customPoints)
@@ -452,8 +514,10 @@ function App() {
       category: 'Custom',
     }
 
-    setPresetActivities((prev) => [newActivity, ...prev])
-    addActivity(newActivity)
+    const nextActivities = [newActivity, ...presetActivities]
+    setPresetActivities(nextActivities)
+    await persistSettings(budget, nextActivities)
+    await addActivity(newActivity)
     setCustomName('')
     setCustomPoints(10)
   }
@@ -479,7 +543,21 @@ function App() {
     return { days, successDays, totalSpent, average, successRate }
   }, [budget, dailyEntries])
 
-  const remaining = Math.max(budget - todayRecord.total, 0)
+  const remaining = Math.max(budget - selectedDateRecord.total, 0)
+  const selectedLabel = formatSelectedDate(selectedDate)
+
+  if (isLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#f7f6f2] px-4 text-slate-700">
+        <div className="rounded-[28px] border border-[#dfe9df] bg-white/80 px-6 py-5 shadow-[0_18px_40px_rgba(116,147,115,0.12)] backdrop-blur-xl">
+          <div className="flex items-center gap-3">
+            <div className="h-4 w-4 animate-spin rounded-full border-2 border-[#739373] border-t-transparent" />
+            <span className="text-sm font-medium tracking-[0.18em] uppercase text-[#4d6b4d]">Loading detox data</span>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen bg-[#f7f6f2] text-slate-800">
@@ -491,16 +569,36 @@ function App() {
             <div className="flex items-center justify-between gap-4">
               <div>
                 <p className="text-xs uppercase tracking-[0.24em] text-[#739373]">Daily tracker</p>
-                <h2 className="mt-2 text-2xl font-semibold text-slate-800">Today&apos;s dopamine spend</h2>
+                <h2 className="mt-2 text-2xl font-semibold text-slate-800">
+                  {isToday
+                    ? "Today's dopamine spend"
+                    : `${selectedLabel.split(',')[0]} dopamine spend`}
+                </h2>
               </div>
-              <button
-                type="button"
-                onClick={resetToday}
-                className="rounded-xl border border-[#e6ddd8] bg-[#fef7f5] px-3 py-2 text-xs font-medium text-[#8d5647] transition hover:border-[#e76f51]/40 hover:bg-[#fde8e4]"
-              >
-                Reset today
-              </button>
+              {isToday ? (
+                <button
+                  type="button"
+                  onClick={resetToday}
+                  className="rounded-xl border border-[#e6ddd8] bg-[#fef7f5] px-3 py-2 text-xs font-medium text-[#8d5647] transition hover:border-[#e76f51]/40 hover:bg-[#fde8e4]"
+                >
+                  Reset today
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setSelectedDate(today)}
+                  className="rounded-xl border border-[#bfd2bf] bg-[#edf6ee] px-3 py-2 text-xs font-medium text-[#4d6b4d] transition hover:bg-[#e3ebe3]"
+                >
+                  Back to Today
+                </button>
+              )}
             </div>
+
+            {!isToday && (
+              <div className="mt-4 rounded-2xl border border-[#dfe9df] bg-[#f5faf5] px-3 py-2 text-sm font-medium text-[#4d6b4d]">
+                Read-Only Mode (Viewing Past Log)
+              </div>
+            )}
 
             <div className="mt-6 rounded-2xl border border-[#edf2ed] bg-[#f7faf7] p-4">
               <div className="mb-3 flex items-center justify-between text-sm text-slate-600">
@@ -515,7 +613,11 @@ function App() {
                     min="10"
                     step="5"
                     value={budget}
-                    onChange={(event) => setBudget(Number(event.target.value) || 10)}
+                    onChange={async (event) => {
+                      const nextBudget = Number(event.target.value) || 10
+                      setBudget(nextBudget)
+                      await persistSettings(nextBudget, presetActivities)
+                    }}
                     className="w-20 rounded-xl border border-[#bfd2bf] bg-white px-2 py-1 text-right text-slate-800 outline-none ring-0"
                   />
                   <span>pts</span>
@@ -525,7 +627,7 @@ function App() {
               <div className="mb-2 flex items-center justify-between text-sm text-slate-600">
                 <span>Used so far</span>
                 <span className={hasExceeded ? 'text-[#c75f47]' : 'text-[#4d6b4d]'}>
-                  {todayRecord.total} / {budget} pts
+                  {selectedDateRecord.total} / {budget} pts
                 </span>
               </div>
 
@@ -538,7 +640,7 @@ function App() {
                         ? 'bg-gradient-to-r from-[#d9c98c] via-[#e9b86d] to-[#e76f51]'
                         : 'bg-gradient-to-r from-[#7aa67c] via-[#98b899] to-[#cfe5cf]'
                   }`}
-                  style={{ width: `${Math.min((todayRecord.total / budget) * 100, 100)}%` }}
+                  style={{ width: `${Math.min((selectedDateRecord.total / Math.max(budget, 1)) * 100, 100)}%` }}
                 />
               </div>
 
@@ -616,7 +718,8 @@ function App() {
                           <button
                             type="button"
                             onClick={() => startEditActivity(activity)}
-                            className="rounded-xl border border-[#e5ebe5] bg-[#f5f8f5] p-2 text-slate-500 transition hover:border-[#b8d0b7] hover:text-[#4d6b4d]"
+                            disabled={!isToday}
+                            className="rounded-xl border border-[#e5ebe5] bg-[#f5f8f5] p-2 text-slate-500 transition hover:border-[#b8d0b7] hover:text-[#4d6b4d] disabled:cursor-not-allowed disabled:opacity-40"
                             aria-label={`Edit ${activity.name}`}
                           >
                             <Pencil className="h-4 w-4" />
@@ -625,7 +728,8 @@ function App() {
                           <button
                             type="button"
                             onClick={() => deleteActivity(activity.id)}
-                            className="rounded-xl border border-[#f0d7d0] bg-[#fff7f5] p-2 text-[#8d5647] transition hover:border-[#e76f51]/40 hover:bg-[#fde8e4]"
+                            disabled={!isToday}
+                            className="rounded-xl border border-[#f0d7d0] bg-[#fff7f5] p-2 text-[#8d5647] transition hover:border-[#e76f51]/40 hover:bg-[#fde8e4] disabled:cursor-not-allowed disabled:opacity-40"
                             aria-label={`Delete ${activity.name}`}
                           >
                             <Trash2 className="h-4 w-4" />
@@ -634,7 +738,8 @@ function App() {
                           <button
                             type="button"
                             onClick={() => removeLatestActivity(activity.id)}
-                            className="rounded-xl border border-[#e7d8d0] bg-[#fff7f5] p-2 text-[#8d5647] transition hover:border-[#e76f51]/40 hover:bg-[#fde8e4]"
+                            disabled={!isToday}
+                            className="rounded-xl border border-[#e7d8d0] bg-[#fff7f5] p-2 text-[#8d5647] transition hover:border-[#e76f51]/40 hover:bg-[#fde8e4] disabled:cursor-not-allowed disabled:opacity-40"
                             aria-label={`Remove ${activity.name}`}
                           >
                             <span className="text-lg leading-none">−</span>
@@ -643,7 +748,8 @@ function App() {
                           <button
                             type="button"
                             onClick={() => addActivity(activity)}
-                            className="rounded-xl border border-[#b8d0b7] bg-[#edf6ee] p-2 text-[#4f7850] transition hover:border-[#739373] hover:bg-[#e3ebe3]"
+                            disabled={!isToday}
+                            className="rounded-xl border border-[#b8d0b7] bg-[#edf6ee] p-2 text-[#4f7850] transition hover:border-[#739373] hover:bg-[#e3ebe3] disabled:cursor-not-allowed disabled:opacity-40"
                             aria-label={`Add ${activity.name}`}
                           >
                             <Plus className="h-4 w-4" />
@@ -656,35 +762,41 @@ function App() {
               })}
             </div>
 
-            <form onSubmit={addCustomActivity} className="mt-6 rounded-2xl border border-dashed border-[#b8d0b7] bg-[#f2f7f2] p-4">
-              <div className="mb-3 flex items-center gap-2 text-[#4d6b4d]">
-                <Activity className="h-4 w-4" />
-                <span className="text-sm font-medium">Custom activity</span>
+            {isToday ? (
+              <form onSubmit={addCustomActivity} className="mt-6 rounded-2xl border border-dashed border-[#b8d0b7] bg-[#f2f7f2] p-4">
+                <div className="mb-3 flex items-center gap-2 text-[#4d6b4d]">
+                  <Activity className="h-4 w-4" />
+                  <span className="text-sm font-medium">Custom activity</span>
+                </div>
+                <div className="grid gap-3 md:grid-cols-[1.3fr_0.7fr_auto]">
+                  <input
+                    type="text"
+                    value={customName}
+                    onChange={(event) => setCustomName(event.target.value)}
+                    placeholder="Example: Late-night doomscroll"
+                    className="rounded-xl border border-[#dfe9df] bg-white px-3 py-2.5 text-slate-800 placeholder:text-slate-500 focus:border-[#739373] outline-none"
+                  />
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={customPoints}
+                    onChange={(event) => setCustomPoints(Number(event.target.value) || 1)}
+                    className="rounded-xl border border-[#dfe9df] bg-white px-3 py-2.5 text-slate-800 outline-none focus:border-[#739373]"
+                  />
+                  <button
+                    type="submit"
+                    className="rounded-xl bg-gradient-to-r from-[#739373] to-[#93a983] px-4 py-2.5 font-medium text-white shadow-[0_10px_25px_rgba(115,147,115,0.25)] transition hover:brightness-105"
+                  >
+                    Add
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div className="mt-6 rounded-2xl border border-dashed border-[#dfe9df] bg-[#f5faf5] p-4 text-sm text-[#4d6b4d]">
+                Read-Only Mode: custom activity changes are disabled for this date.
               </div>
-              <div className="grid gap-3 md:grid-cols-[1.3fr_0.7fr_auto]">
-                <input
-                  type="text"
-                  value={customName}
-                  onChange={(event) => setCustomName(event.target.value)}
-                  placeholder="Example: Late-night doomscroll"
-                  className="rounded-xl border border-[#dfe9df] bg-white px-3 py-2.5 text-slate-800 placeholder:text-slate-500 focus:border-[#739373] outline-none"
-                />
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={customPoints}
-                  onChange={(event) => setCustomPoints(Number(event.target.value) || 1)}
-                  className="rounded-xl border border-[#dfe9df] bg-white px-3 py-2.5 text-slate-800 outline-none focus:border-[#739373]"
-                />
-                <button
-                  type="submit"
-                  className="rounded-xl bg-gradient-to-r from-[#739373] to-[#93a983] px-4 py-2.5 font-medium text-white shadow-[0_10px_25px_rgba(115,147,115,0.25)] transition hover:brightness-105"
-                >
-                  Add
-                </button>
-              </div>
-            </form>
+            )}
           </section>
 
           <aside className="space-y-6">
@@ -717,13 +829,13 @@ function App() {
                   <h3 className="mt-2 text-xl font-semibold text-slate-800">Breakdown</h3>
                 </div>
                 <div className="rounded-full bg-[#edf6ee] px-2 py-1 text-sm text-[#4d6b4d]">
-                  {todayRecord.items.length} entries
+                  {selectedDateRecord.items.length} entries
                 </div>
               </div>
 
               <div className="space-y-3">
-                {todayRecord.items.length ? (
-                  todayRecord.items.map((item) => (
+                {selectedDateRecord.items.length ? (
+                  selectedDateRecord.items.map((item) => (
                     <div
                       key={item.id}
                       className="flex items-center justify-between rounded-2xl border border-[#edf2ed] bg-[#f7faf7] px-3 py-2.5"
@@ -749,7 +861,9 @@ function App() {
                   ))
                 ) : (
                   <div className="rounded-2xl border border-dashed border-[#d4dfd4] bg-[#f5faf5] p-4 text-sm text-slate-500">
-                    No dopamine spikes logged yet. Pick an activity to begin the detox.
+                    {isToday
+                      ? 'No dopamine spikes logged yet. Pick an activity to begin the detox.'
+                      : 'ไม่มีการบันทึกข้อมูลในวันนี้'}
                   </div>
                 )}
               </div>
@@ -758,7 +872,12 @@ function App() {
         </main>
 
         <div className="mt-6">
-          <MonthlyCalendar dailyEntries={dailyEntries} budget={budget} />
+          <MonthlyCalendar
+            dailyEntries={dailyEntries}
+            budget={budget}
+            selectedDate={selectedDate}
+            onSelectDate={setSelectedDate}
+          />
         </div>
 
         {!isAlertDismissed && isWarning && (
@@ -769,7 +888,7 @@ function App() {
                 <div className="space-y-2">
                   <div className="text-sm font-semibold uppercase tracking-[0.2em]">Early warning: high risk zone</div>
                   <p className="text-base font-medium text-[#553a28]">
-                    You are at {todayRecord.total} / {budget} pts. Reduce stimulus before crossing the full budget.
+                    You are at {selectedDateRecord.total} / {budget} pts. Reduce stimulus before crossing the full budget.
                   </p>
                 </div>
               </div>
