@@ -11,6 +11,7 @@ import {
   Trash2,
   Wallet,
   Zap,
+  Check,
 } from 'lucide-react'
 import {
   collection,
@@ -140,6 +141,28 @@ const persistDayRecord = async (dateKey, nextRecord) => {
       items: nextRecord.items,
       total: nextRecord.total,
       updatedAt: new Date().toISOString(),
+    },
+    { merge: true },
+  )
+}
+
+const persistNote = async (dateKey, noteText) => {
+  const ref = getDayDoc(dateKey)
+
+  if (!noteText || !noteText.trim()) {
+    await setDoc(
+      ref,
+      { dailyNote: null, noteUpdatedAt: new Date().toISOString() },
+      { merge: true },
+    )
+    return
+  }
+
+  await setDoc(
+    ref,
+    {
+      dailyNote: noteText.trim(),
+      noteUpdatedAt: new Date().toISOString(),
     },
     { merge: true },
   )
@@ -313,9 +336,112 @@ function MonthlyCalendar({ dailyEntries, budget, selectedDate, visibleMonth, onS
   )
 }
 
+function Footer() {
+  const currentYear = new Date().getFullYear()
+
+  return (
+    <footer className="mt-8 border-t border-[#e7ece6] bg-gradient-to-b from-transparent to-[#f9faf8]/60 py-6 px-4">
+      <div className="mx-auto max-w-7xl">
+        <div className="text-center space-y-2">
+          <p className="text-sm text-slate-600">
+            Created with <span className="text-red-500">❤️</span> by <span className="font-medium text-slate-700">Kwanchai Amphawa</span>
+          </p>
+          <p className="text-xs uppercase tracking-[0.15em] text-slate-400">
+            © {currentYear} Dopamine Detox App. All rights reserved.
+          </p>
+        </div>
+      </div>
+    </footer>
+  )
+}
+
+function DailyNoteCard({ selectedDate, dailyNotes, isToday, onNoteSave }) {
+  const [noteText, setNoteText] = useState('')
+  const [isSaving, setIsSaving] = useState(false)
+  const [saveStatus, setSaveStatus] = useState('')
+
+  useEffect(() => {
+    const note = dailyNotes[selectedDate] || ''
+    setNoteText(note)
+    setSaveStatus('')
+  }, [selectedDate, dailyNotes])
+
+  const handleSaveNote = async () => {
+    if (isSaving) return
+
+    setIsSaving(true)
+    try {
+      await onNoteSave(selectedDate, noteText)
+      setSaveStatus('Saved ✓')
+      setTimeout(() => setSaveStatus(''), 2000)
+    } catch (error) {
+      console.error('Failed to save note:', error)
+      setSaveStatus('Error')
+      setTimeout(() => setSaveStatus(''), 2000)
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const formattedDate = formatSelectedDate(selectedDate)
+
+  return (
+    <section className="rounded-[28px] border border-[#e7ece6] bg-white/80 p-5 shadow-[0_18px_40px_rgba(116,147,115,0.12)] backdrop-blur-xl">
+      <div className="mb-5">
+        <p className="text-xs uppercase tracking-[0.24em] text-[#739373]">Daily note</p>
+        <h3 className="mt-2 text-2xl font-semibold text-slate-800">
+          Daily Note — {formattedDate}
+        </h3>
+      </div>
+
+      {isToday ? (
+        <div className="space-y-4">
+          <textarea
+            value={noteText}
+            onChange={(e) => setNoteText(e.target.value)}
+            placeholder="บันทึกข้อความสั้นๆ ว่าเกิดอะไรขึ้นในวันนี้ หรือความรู้สึกระหว่างการ Detox... (Optional)"
+            className="w-full rounded-2xl border border-[#dfe9df] bg-white px-4 py-3 text-slate-800 placeholder:text-slate-400 outline-none focus:border-[#739373] focus:ring-2 focus:ring-[#739373]/20 transition min-h-32 resize-none"
+          />
+
+          <div className="flex items-center justify-between gap-3">
+            <button
+              type="button"
+              onClick={handleSaveNote}
+              disabled={isSaving}
+              className="rounded-xl bg-gradient-to-r from-[#739373] to-[#93a983] px-4 py-2.5 font-medium text-white shadow-[0_10px_25px_rgba(115,147,115,0.25)] transition hover:brightness-105 disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {isSaving ? 'Saving...' : 'Save Note'}
+            </button>
+
+            {saveStatus && (
+              <div className="flex items-center gap-2 text-sm font-medium text-[#4d6b4d]">
+                <Check className="h-4 w-4" />
+                {saveStatus}
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {noteText ? (
+            <div className="rounded-2xl border border-[#dfe9df] bg-[#f9fbf9] px-4 py-3 text-slate-700 leading-relaxed whitespace-pre-wrap break-words">
+              {noteText}
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-dashed border-[#d4dfd4] bg-[#f5faf5] px-4 py-6 text-center text-slate-500">
+              <p className="text-sm">ไม่มีบันทึกสำหรับวันนี้</p>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
 function App() {
   const [budget, setBudget] = useState(100)
   const [dailyEntries, setDailyEntries] = useState({})
+  const [dailyNotes, setDailyNotes] = useState({})
   const [presetActivities, setPresetActivities] = useState(defaultActivities)
   const [selectedDate, setSelectedDate] = useState(() => todayKey())
   const [calendarMonth, setCalendarMonth] = useState(() => {
@@ -356,6 +482,7 @@ function App() {
       logsRef,
       (snapshot) => {
         const nextEntries = {}
+        const nextNotes = {}
 
         snapshot.forEach((document) => {
           const data = document.data() ?? {}
@@ -364,14 +491,20 @@ function App() {
             items,
             total: Number(data.total) || items.reduce((sum, item) => sum + Number(item.points || 0), 0),
           }
+          
+          if (data.dailyNote) {
+            nextNotes[document.id] = data.dailyNote
+          }
         })
 
         setDailyEntries(nextEntries)
+        setDailyNotes(nextNotes)
         setIsLoading(false)
       },
       (error) => {
         console.error('Failed to load daily logs:', error)
         setDailyEntries({})
+        setDailyNotes({})
         setIsLoading(false)
       },
     )
@@ -943,6 +1076,15 @@ function App() {
           />
         </div>
 
+        <div className="mt-6">
+          <DailyNoteCard
+            selectedDate={selectedDate}
+            dailyNotes={dailyNotes}
+            isToday={isToday}
+            onNoteSave={persistNote}
+          />
+        </div>
+
         {!isAlertDismissed && isWarning && (
           <div className="mt-6 rounded-[22px] border border-[#f3d4a7] bg-gradient-to-r from-[#fff5d8] via-[#fef3cf] to-[#fde8cc] px-5 py-4 text-[#7c4e2f] shadow-[0_12px_26px_rgba(121,93,41,0.08)]">
             <div className="flex items-start justify-between gap-4">
@@ -990,6 +1132,8 @@ function App() {
           </p>
         </div>
       </div>
+
+      <Footer />
     </div>
   )
 }
